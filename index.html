@@ -936,11 +936,10 @@
       setInterval(loadDayUv, 15 * 60 * 1000);
     </script>
 
-    <!-- ===================== CAMERA: CÓ NGƯỜI + VUỐT TAY ===================== -->
+    <!-- ===================== CAMERA (CÓ NGƯỜI) + REMOTE (↑ ↓) ===================== -->
     <script type="module">
       import {
         FilesetResolver,
-        HandLandmarker,
         FaceDetector,
       } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
@@ -949,17 +948,6 @@
       const ON_DELAY_MS = 2000; // có người đứng liên tục 2 giây -> bật màn hình
       const GAP_TOLERANCE_MS = 700; // bỏ lỡ nhận diện ngắn hơn mức này vẫn tính là đứng liên tục
       const FACE_CHECK_MS = 150; // tần suất kiểm tra khuôn mặt (ms)
-
-      /* ====== CẤU HÌNH VUỐT TAY (đã chỉnh cho cam 640x480) ====== */
-      const SWIPE_MIN_DIST = 0.1; // tay phải đi được ≥ 10% bề ngang khung hình (trước: 22%)
-      const SWIPE_MAX_TIME = 900; // cửa sổ thời gian để hoàn thành cú vuốt (ms)
-      const SWIPE_MIN_TIME = 60; // quá nhanh dưới mức này coi là nhiễu (ms)
-      const SWIPE_MIN_SPEED = 0.15; // tốc độ tối thiểu (bề ngang khung hình / giây), tránh kích hoạt khi tay chỉ trôi chậm
-      const SWIPE_MAX_DRIFT = 1.2; // cho phép lệch dọc tới 120% quãng ngang (vuốt chéo vẫn nhận)
-      const SWIPE_COOLDOWN = 800; // nghỉ giữa 2 lần vuốt (ms)
-      const HAND_LOST_RESET_MS = 400; // mất dấu tay ngắn hơn mức này thì giữ nguyên lịch sử vuốt
-      const SMOOTHING = 0.6; // làm mượt toạ độ tay (0..1, càng lớn càng bám sát tay)
-      const FLIP_DIRECTION = false; // nếu thấy vuốt trái/phải bị ngược → đổi thành true
 
       const stage = document.getElementById("stage");
       const video = document.getElementById("cam");
@@ -979,7 +967,26 @@
         stage.classList.toggle("show-page2", n === 2);
       }
 
-      // Gọi mỗi khi phát hiện có người (khuôn mặt hoặc bàn tay)
+      /* ====== ĐIỀU KHIỂN BẰNG REMOTE TV BOX ====== */
+      // Mũi tên xuống -> trang UV, mũi tên lên -> trang đồng hồ
+      document.addEventListener("keydown", (e) => {
+        if (!isOn) return; // màn hình đang tắt thì bỏ qua
+
+        const isDown =
+          e.key === "ArrowDown" || e.keyCode === 20 || e.keyCode === 40;
+        const isUp =
+          e.key === "ArrowUp" || e.keyCode === 19 || e.keyCode === 38;
+
+        if (isDown) {
+          e.preventDefault();
+          showPage(2);
+        } else if (isUp) {
+          e.preventDefault();
+          showPage(1);
+        }
+      });
+
+      // Gọi mỗi khi phát hiện có người (khuôn mặt)
       function markSeen(now) {
         // nếu trước đó đã mất dấu quá lâu -> bắt đầu đếm lại từ đầu
         if (now - lastSeen > GAP_TOLERANCE_MS) presenceSince = now;
@@ -1023,22 +1030,6 @@
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
         );
 
-        const hands = await createWithFallback((delegate) =>
-          HandLandmarker.createFromOptions(fileset, {
-            baseOptions: {
-              modelAssetPath:
-                "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-              delegate,
-            },
-            runningMode: "VIDEO",
-            numHands: 1,
-            // hạ ngưỡng để cam độ phân giải thấp vẫn bắt được tay khi vuốt nhanh
-            minHandDetectionConfidence: 0.4,
-            minHandPresenceConfidence: 0.4,
-            minTrackingConfidence: 0.4,
-          }),
-        );
-
         const faces = await createWithFallback((delegate) =>
           FaceDetector.createFromOptions(fileset, {
             baseOptions: {
@@ -1051,44 +1042,8 @@
           }),
         );
 
-        let history = []; // {t, x, y} (đã làm mượt)
-        let sx = null; // toạ độ tay đã làm mượt
-        let sy = null;
-        let lastSwipe = 0;
         let lastFaceCheck = 0;
         let lastVideoTime = -1;
-        let lastHandSeen = 0;
-
-        function onSwipe(dx) {
-          // dx > 0: tay chạy sang phải khung hình camera = người dùng vuốt sang TRÁI của họ
-          let userLeft = dx > 0;
-          if (FLIP_DIRECTION) userLeft = !userLeft;
-          showPage(userLeft ? 2 : 1); // vuốt trái → trang UV, vuốt phải → trang đầu
-        }
-
-        // So điểm hiện tại với MỌI điểm trước đó trong cửa sổ thời gian.
-        // Chỉ cần có một đoạn đủ dài + đủ nhanh + đủ ngang là tính là vuốt,
-        // nên tay đi cong, hơi chậm đầu/cuối, hoặc rụt về nhẹ vẫn nhận.
-        function detectSwipe() {
-          if (history.length < 3) return 0;
-          const cur = history[history.length - 1];
-          for (let i = 0; i < history.length - 1; i++) {
-            const p = history[i];
-            const dt = cur.t - p.t;
-            if (dt < SWIPE_MIN_TIME) continue;
-            const dx = cur.x - p.x;
-            const dy = cur.y - p.y;
-            const speed = Math.abs(dx) / (dt / 1000);
-            if (
-              Math.abs(dx) >= SWIPE_MIN_DIST &&
-              speed >= SWIPE_MIN_SPEED &&
-              Math.abs(dy) <= Math.abs(dx) * SWIPE_MAX_DRIFT
-            ) {
-              return dx;
-            }
-          }
-          return 0;
-        }
 
         // Khởi động xong: tính như đang có người, bắt đầu đếm từ bây giờ
         lastSeen = performance.now();
@@ -1099,54 +1054,6 @@
 
           if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
             lastVideoTime = video.currentTime;
-
-            // --- Nhận diện bàn tay ---
-            const hr = hands.detectForVideo(video, now);
-            if (hr.landmarks && hr.landmarks.length > 0) {
-              const lm = hr.landmarks[0];
-              // tâm lòng bàn tay: cổ tay + gốc 4 ngón
-              const ids = [0, 5, 9, 13, 17];
-              let x = 0,
-                y = 0;
-              ids.forEach((i) => {
-                x += lm[i].x;
-                y += lm[i].y;
-              });
-              x /= ids.length;
-              y /= ids.length;
-
-              // làm mượt để bớt rung do nhiễu cam độ phân giải thấp
-              if (sx === null || now - lastHandSeen > HAND_LOST_RESET_MS) {
-                sx = x;
-                sy = y;
-              } else {
-                sx += (x - sx) * SMOOTHING;
-                sy += (y - sy) * SMOOTHING;
-              }
-
-              markSeen(now);
-              lastHandSeen = now;
-
-              // chỉ nhận vuốt khi màn hình đang sáng
-              if (isOn) {
-                history.push({ t: now, x: sx, y: sy });
-                history = history.filter((p) => now - p.t <= SWIPE_MAX_TIME);
-
-                if (now - lastSwipe > SWIPE_COOLDOWN) {
-                  const dx = detectSwipe();
-                  if (dx !== 0) {
-                    lastSwipe = now;
-                    history = [];
-                    onSwipe(dx);
-                  }
-                }
-              }
-            } else if (now - lastHandSeen > HAND_LOST_RESET_MS) {
-              // chỉ xoá lịch sử khi mất tay đủ lâu (vuốt nhanh hay bị mờ 1-2 khung)
-              history = [];
-              sx = null;
-              sy = null;
-            }
 
             // --- Nhận diện có người (khuôn mặt) ---
             if (now - lastFaceCheck > FACE_CHECK_MS) {
